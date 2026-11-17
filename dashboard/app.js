@@ -7,7 +7,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', watchlistOnly: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -131,11 +131,13 @@
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
     if (params.get('category')) state.category = params.get('category');
+    if (params.get('watchlist')) state.watchlistOnly = params.get('watchlist') === '1';
   }
   function writeHash() {
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
     if (state.category !== 'all') params.set('category', state.category);
+    if (state.watchlistOnly) params.set('watchlist', '1');
     if (state.selected) params.set('p', state.selected);
     var next = params.toString();
     if (next) window.history.replaceState(null, '', '#' + next);
@@ -146,6 +148,7 @@
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
       if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.watchlistOnly && !r.watchlist) return false;
       if (!q) return true;
       var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
@@ -168,25 +171,33 @@
 
   function header() {
     return el('header', { class: 'top' },
-      el('div', { class: 'brand' }, el('span', { class: 'mark' }), el('span', { class: 'brand-name', text: 'Token Radar' })),
+      el('div', { class: 'brand' },
+        el('span', { class: 'mark' }),
+        el('div', { class: 'brand-text' },
+          el('span', { class: 'brand-name', text: 'TOKEN RADAR' }),
+          el('span', { class: 'brand-tag', text: 'Which pre-token protocol is worth farming next — priced, ranked, and shown its work' })
+        )
+      ),
       el('div', { class: 'top-meta' },
-        el('span', { text: 'Snapshot ' + DATA.as_of }),
-        el('span', { text: 'DefiLlama protocol index' }),
-        el('span', { text: DATA.model_version + ' model' })
+        el('span', { class: 'meta-chip', text: 'Snapshot ' + DATA.as_of }),
+        el('span', { class: 'meta-chip', text: 'DefiLlama protocol index' }),
+        el('span', { class: 'meta-chip accent', text: DATA.model_version + ' model' })
       )
     );
   }
 
   function lede() {
+    var thinCount = DATA.rows.filter(function (r) { return r.thin_sample; }).length;
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.board_size + ' pre-token protocols, ranked by comparable value' }),
-        el('p', { text: 'The watchlist is the floor, not the ceiling: all ' + DATA.watchlist_size + ' watchlist protocols are ranked, and the radar adds ' + DATA.early_size + ' more that pass the same pre-token screen at any TVL. Each is priced from its own category\'s traded comparables, then discounted for launch risk. Implied value is a model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor, not the ceiling: all ' + DATA.watchlist_size + ' watchlist protocols are ranked, and the radar adds ' + DATA.early_size + ' more that pass the same pre-token screen at any TVL. Each is priced from its own category\'s traded comparables — credibility-weighted, so a category with one or two traded peers borrows the global median instead of inheriting an outlier — then discounted for launch risk. Rows priced on thin evidence carry a low-confidence flag, in the table and in their detail view. Implied value is a model, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Thin-sample rows flagged' }), el('b', { text: String(thinCount) })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
       )
     );
@@ -203,9 +214,11 @@
     select.addEventListener('change', function () { state.category = select.value; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
+    var wl = el('button', { type: 'button', class: 'toggle' + (state.watchlistOnly ? ' on' : ''), 'aria-pressed': state.watchlistOnly ? 'true' : 'false', text: state.watchlistOnly ? 'Watchlist only: on' : 'Watchlist only: off', onclick: function () { state.watchlistOnly = !state.watchlistOnly; writeHash(); render(); } });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
+      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Scope' }), wl),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
       el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
     );
@@ -226,7 +239,7 @@
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'No protocol matches that filter' }),
         el('p', { text: 'Clear the search or pick another category to see the board again.' }),
-        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; writeHash(); render(); } })
+        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.watchlistOnly = false; writeHash(); render(); } })
       ));
     }
     var max = list[0].implied_value_usd || 1;
@@ -240,9 +253,13 @@
         onclick: function () { openDetail(r.slug); },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
-        el('td', { class: 'num', text: String(r.rank) }),
+        el('td', { class: 'num' }, el('span', { class: 'rank' + (r.rank <= 3 ? ' top' : ''), text: String(r.rank) })),
         el('td', null, el('div', { class: 'name' },
-          el('b', { text: r.name }),
+          el('div', { class: 'name-line' },
+            el('b', { text: r.name }),
+            r.watchlist ? el('span', { class: 'badge wl', text: 'watchlist' }) : null,
+            r.thin_sample ? el('span', { class: 'badge thin', text: 'low confidence · n=' + r.comparables_n }) : null
+          ),
           el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') })
         )),
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
@@ -250,7 +267,7 @@
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
-          el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
+          el('span', { class: 'num strong', text: fmtUsd(r.implied_value_usd) })
         )),
         el('td', { class: 'num', text: 'x' + r.category_multiple.toFixed(2) + ' / ' + r.launch_discount.toFixed(2) }),
         el('td', null, el('span', { class: 'status', text: 'no token' }))
@@ -308,7 +325,7 @@
       el('div', { class: 'formula' },
         'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x launch_discount )'
       ),
-      el('p', { class: 'sub', text: 'The category multiple is the median market-cap / TVL of the category\'s traded protocols, each ratio winsorized to [' + m.multiple_floor + ', ' + m.multiple_cap + '] and shrunk toward the global median (shrinkage k = ' + m.shrinkage_k + '), so thin categories borrow the market\'s evidence instead of two outliers. The launch discount runs from ' + m.discount_floor + ' to ' + (m.discount_floor + m.discount_range).toFixed(2) + ': it blends TVL scale on a log axis, an age profile that rewards two years of operating tokenless and eases off after five, the share of the category that already has a token, and chain breadth. Open any row to see its own factors and the sentence they make.' })
+      el('p', { class: 'sub', text: 'The category multiple is the median market-cap / TVL of the category\'s traded protocols, each ratio winsorized to [' + m.multiple_floor + ', ' + m.multiple_cap + '] and shrunk toward the global median (shrinkage k = ' + m.shrinkage_k + '). Credibility then decides how much of what is left to believe: a category with n traded comparables earns credibility n / (n + ' + m.credibility_k + '), and only that fraction of its shrunk multiple\'s distance from the global median is priced in — one comparable earns a ninth of its deviation, ninety earn almost all of theirs. Categories with at most ' + m.thin_sample_max + ' comparables are flagged low-confidence on every row they price. The launch discount runs from ' + m.discount_floor + ' to ' + (m.discount_floor + m.discount_range).toFixed(2) + ': it blends TVL scale on a log axis, an age profile that rewards two years of operating tokenless and eases off after five, the share of the category that already has a token, and chain breadth. Open any row to see its own factors and the sentence they make.' })
     );
   }
 
@@ -324,23 +341,32 @@
     var steps = farmSteps(row);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
-        el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size }),
+        el('span', { class: 'rank-label', text: 'Rank ' + row.rank + ' of ' + DATA.board_size }),
         el('h2', { id: 'detail-title', text: row.name }),
-        el('p', { class: 'sub', text: (row.category || 'Other') + ' on ' + (row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') })
+        el('p', { class: 'sub', text: (row.category || 'Other') + ' on ' + (row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') + (row.watchlist ? ' · on the house watchlist' : '') })
       ),
       el('button', { class: 'close', type: 'button', 'aria-label': 'Close details', text: 'Close', onclick: function () { dialog.close(); } })
     ));
+    if (row.thin_sample) {
+      dialog.appendChild(el('div', { class: 'warn', role: 'note' },
+        el('b', { text: 'Low confidence — thin sample. ' }),
+        'This category is priced from only ' + row.comparables_n + ' traded comparable' + (row.comparables_n === 1 ? '' : 's') + '. Credibility ' + row.credibility.toFixed(2) + ' means most of the category median\'s distance from the global median is discounted away; treat the implied value as a wide range, not a point estimate.'
+      ));
+    }
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Category multiple' }), el('b', { class: 'num', text: 'x' + row.category_multiple.toFixed(4) + ' (' + row.comparables_n + ' comparables)' })),
+        el('div', null, el('span', { text: 'Traded comparables' }), el('b', { class: 'num', text: String(row.comparables_n) + (row.thin_sample ? ' (thin sample)' : '') })),
+        el('div', null, el('span', { text: 'Category median multiple' }), el('b', { class: 'num', text: 'x' + row.category_median.toFixed(4) })),
+        el('div', null, el('span', { text: 'Credibility weight' }), el('b', { class: 'num', text: row.credibility.toFixed(4) })),
+        el('div', null, el('span', { text: 'Effective category multiple' }), el('b', { class: 'num', text: 'x' + row.category_multiple.toFixed(4) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Launch discount' }), el('b', { class: 'num', text: String(row.launch_discount) })),
         el('div', null, el('span', { text: 'Category launch share' }), el('b', { class: 'num', text: Math.round(row.category_propensity * 100) + '%' })),
-        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
+        el('div', { class: 'total' }, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: row.reason }),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
