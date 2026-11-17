@@ -11,7 +11,19 @@
 //   multiple   the category's comparable value: the median market-cap / TVL ratio of the category's
 //              token-bearing protocols, each ratio winsorized to [MULTIPLE_FLOOR, MULTIPLE_CAP] so one
 //              speculative outlier cannot price a whole category, then shrunk toward the global median
-//              by the category's sample size: multiple = (n x catMedian + K x globalMedian) / (n + K)
+//              by the category's sample size: shrunk = (n x catMedian + K x globalMedian) / (n + K).
+//              Shrinkage alone still lets a single extreme comparable move its category: with one
+//              comparable at ~2.9x against a global median of ~0.18x, the shrunk multiple lands near
+//              0.33x — an 84% premium over the global median, resting on one observation. So the
+//              multiple the board actually uses is credibility-weighted (phase 2): only the fraction
+//              credibility = n / (n + CREDIBILITY_K) of the gap between the shrunk multiple and the
+//              global median is trusted, and the rest is priced at the global median:
+//              multiple = globalMedian + credibility x (shrunk - globalMedian). One comparable earns
+//              1/9 of its deviation; sixteen earn 2/3; ninety earn ~92%. The rule is a function of
+//              the comparable count alone — no category is named, and a below-global thin category
+//              is pulled up toward the global median by exactly the same weight it would be pulled
+//              down. Categories with at most THIN_SAMPLE_MAX comparables are flagged thin_sample on
+//              every row, and the dashboard discloses the count wherever such a row is opened.
 //   growthMult 1 + clamp(change_7d, -30, 50) / 100 x 0.30: a week's momentum, deliberately weak
 //   discount   a launch-and-quality discount in [0.40, 0.95]: 0.40 + 0.55 x score, where the score is
 //              0.35 x TVL scale (log scale) + 0.25 x age profile + 0.25 x the category's own launch
@@ -50,6 +62,8 @@ export interface ModelConstants {
   multiple_cap: number;
   multiple_floor: number;
   shrinkage_k: number;
+  credibility_k: number;
+  thin_sample_max: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -62,6 +76,8 @@ export const MODEL: ModelConstants = {
   multiple_cap: 5,
   multiple_floor: 0.01,
   shrinkage_k: 16,
+  credibility_k: 8,
+  thin_sample_max: 4,
   growth_weight: 0.3,
   growth_floor: -30,
   growth_cap: 50,
@@ -71,7 +87,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -86,6 +102,10 @@ export interface FarmStep {
 /** The per-row factor breakdown: every number the implied value is built from. */
 export interface RowFactors {
   category_multiple: number;
+  category_median: number;
+  shrunk_multiple: number;
+  credibility: number;
+  thin_sample: boolean;
   comparables_n: number;
   growth_multiplier: number;
   launch_discount: number;
@@ -139,6 +159,10 @@ export interface RadarRow {
   growth_multiplier: number;
   maturity_multiplier: number;
   category_multiple: number;
+  category_median: number;
+  credibility: number;
+  thin_sample: boolean;
+  watchlist: boolean;
   comparables_n: number;
   launch_discount: number;
   category_propensity: number;
@@ -244,11 +268,22 @@ interface CategoryStats {
   tokenBearing: number;
 }
 
+/** One category's pricing: its raw median, its shrunk multiple, the credibility the sample size
+ * earns, the effective multiple the board prices with, and its launch share. */
+export interface CategoryPricing {
+  multiple: number;
+  median: number;
+  shrunk: number;
+  credibility: number;
+  n: number;
+  propensity: number;
+}
+
 /** The comparable-pricing context one snapshot implies: global and per-category medians and shares. */
 export interface ScoreContext {
   globalMultiple: number;
   globalPropensity: number;
-  categories: Map<string, { multiple: number; n: number; propensity: number }>;
+  categories: Map<string, CategoryPricing>;
 }
 
 function median(values: number[]): number {
@@ -281,15 +316,28 @@ export function scoreContext(snapshot: Snapshot, model: ModelConstants = MODEL):
   }
   const globalMultiple = allMultiples.length > 0 ? median(allMultiples) : model.multiple_floor;
   const globalPropensity = totalAll > 0 ? tokenAll / totalAll : 0;
-  const categories = new Map<string, { multiple: number; n: number; propensity: number }>();
+  const categories = new Map<string, CategoryPricing>();
   for (const [key, s] of stats) {
     const n = s.multiples.length;
     const catMedian = n > 0 ? median(s.multiples) : globalMultiple;
     // Shrink small samples toward the global median, hard: with K = 16 a category needs sixteen
-    // comparables before its own median counts for half, so one hot comparable (a lone Risk Curators
-    // protocol trading near 3x TVL) nudges its category instead of pricing it.
-    const multiple = n > 0 ? (n * catMedian + model.shrinkage_k * globalMultiple) / (n + model.shrinkage_k) : globalMultiple;
-    categories.set(key, { multiple, n, propensity: s.total > 0 ? s.tokenBearing / s.total : globalPropensity });
+    // comparables before its own median counts for half, so one hot comparable (a lone protocol
+    // trading near 3x TVL) nudges its category instead of pricing it.
+    const shrunk = n > 0 ? (n * catMedian + model.shrinkage_k * globalMultiple) / (n + model.shrinkage_k) : globalMultiple;
+    // Credibility (phase 2): shrinkage averages the category median with the global one, but the
+    // result still leans on the thin sample for the whole of its remaining deviation. Trust only
+    // the fraction n / (n + credibility_k) of that deviation and price the rest at the global
+    // median. With no comparables the category is the global median, exactly.
+    const credibility = n > 0 ? n / (n + model.credibility_k) : 0;
+    const multiple = globalMultiple + credibility * (shrunk - globalMultiple);
+    categories.set(key, {
+      multiple,
+      median: catMedian,
+      shrunk,
+      credibility,
+      n,
+      propensity: s.total > 0 ? s.tokenBearing / s.total : globalPropensity,
+    });
   }
   return { globalMultiple, globalPropensity, categories };
 }
@@ -328,6 +376,9 @@ export function impliedValue(
   const age = ageDays(asOf, protocol.listed_at);
   const cat = ctx.categories.get(protocol.category ?? '') ?? {
     multiple: ctx.globalMultiple,
+    median: ctx.globalMultiple,
+    shrunk: ctx.globalMultiple,
+    credibility: 0,
     n: 0,
     propensity: ctx.globalPropensity,
   };
@@ -347,6 +398,10 @@ export function impliedValue(
     age,
     factors: {
       category_multiple: round4(cat.multiple),
+      category_median: round4(cat.median),
+      shrunk_multiple: round4(cat.shrunk),
+      credibility: round4(cat.credibility),
+      thin_sample: cat.n <= model.thin_sample_max,
       comparables_n: cat.n,
       growth_multiplier: round4(growthMult),
       launch_discount: round4(discount),
@@ -363,11 +418,14 @@ export function reasonFor(p: SnapshotProtocol, factors: RowFactors): string {
   const cat = p.category ?? 'Uncategorized';
   const base =
     factors.comparables_n > 0
-      ? `${cat} protocols that already trade price at a median ${factors.category_multiple}x TVL (${factors.comparables_n} comparable${factors.comparables_n === 1 ? '' : 's'}, shrunk toward the global median)`
+      ? `${cat} protocols that already trade price at a median ${factors.category_median}x TVL (${factors.comparables_n} comparable${factors.comparables_n === 1 ? '' : 's'}); credibility ${factors.credibility} pulls that toward the global median, for an effective multiple of ${factors.category_multiple}x`
       : `no ${cat} protocol trades yet, so the global comparable median ${factors.category_multiple}x TVL prices it`;
   const launch = `${Math.round(factors.category_propensity * 100)}% of ${cat} protocols in the snapshot already have a token`;
   const scale = `its TVL scale score is ${factors.scale_score} on the snapshot's log range`;
-  return `Priced from comparables: ${base}; ${launch}; ${scale}; the launch discount is ${factors.launch_discount}.`;
+  const thin = factors.thin_sample
+    ? ` Low confidence: only ${factors.comparables_n} comparable${factors.comparables_n === 1 ? '' : 's'} price this category, so most of its value rests on the global median, not on category evidence.`
+    : '';
+  return `Priced from comparables: ${base}; ${launch}; ${scale}; the launch discount is ${factors.launch_discount}.${thin}`;
 }
 
 /** The snapshot's protocol by slug. */
@@ -567,7 +625,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 }
 
 /** A board row's compact form for data.js, with the farm plan generated in the page. */
-export function radarRow(row: BoardRow): RadarRow {
+export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
   return {
     rank: row.rank,
     slug: row.slug,
@@ -583,6 +641,10 @@ export function radarRow(row: BoardRow): RadarRow {
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     category_multiple: row.factors.category_multiple,
+    category_median: row.factors.category_median,
+    credibility: row.factors.credibility,
+    thin_sample: row.factors.thin_sample,
+    watchlist,
     comparables_n: row.factors.comparables_n,
     launch_discount: row.factors.launch_discount,
     category_propensity: row.factors.category_propensity,
@@ -605,7 +667,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    rows: board.map(radarRow),
+    rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,
   };
   return { board, radar };
