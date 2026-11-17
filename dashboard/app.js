@@ -253,7 +253,7 @@
         onclick: function () { openDetail(r.slug); },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
-        el('td', { class: 'num' }, el('span', { class: 'rank' + (r.rank <= 3 ? ' top' : ''), text: String(r.rank) })),
+        el('td', { class: 'num' }, el('span', { class: 'rank' + (r.rank <= 3 ? ' podium' : ''), text: String(r.rank) })),
         el('td', null, el('div', { class: 'name' },
           el('div', { class: 'name-line' },
             el('b', { text: r.name }),
